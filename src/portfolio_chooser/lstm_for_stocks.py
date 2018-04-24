@@ -28,7 +28,7 @@ class LstmStockTrainer:
         model.add(LSTM(95, activation='tanh', return_sequences=True))
         model.add(Dropout(0.10))
         # model.add(Flatten())
-        model.add(Dense(5, activation='sigmoid'))
+        model.add(Dense(5, activation='tanh'))
         model.compile(optimizer='adam', loss='mse')
         history = model.fit(x_train, y_train, epochs=100, validation_data=(x_valid, y_valid), shuffle=False)
         return model

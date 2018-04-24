@@ -288,6 +288,48 @@ def create_stock_data(ticker, df):
 
     return diff_df_matrix, last_date
 
+def create_datasets(diff_df_matrix, last_date):
+  data_raw_x = diff_df_matrix
+  data_raw_y = diff_df_matrix[:,[1,2,3,4,5]]# convert to numpy array
+
+  min_max_scaler_x = MinMaxScaler()
+  x_norm = min_max_scaler_x.fit_transform(data_raw_x)
+
+  x_norm = add_date_features(last_date[1], x_norm)
+
+  min_max_scaler_y = MinMaxScaler()
+  y_norm = min_max_scaler_y.fit_transform(data_raw_y)
+
+  index_range_x = 90 + 90
+
+  data = []
+  data_y = []
+
+
+    # create all possible sequences of length seq_len
+  for index in range(len(x_norm) - index_range_x):
+    data.append(x_norm[index: index + 90])
+
+  for index in range(90, len(y_norm) - 90):
+    data_y_array = y_norm[index: index + 90]
+    data_y.append(data_y_array)
+
+  data = np.array(data);
+  data_y = np.array(data_y);
+  valid_set_size = int(np.round(np.float(util.valid_set_size_percentage) / 100 * data.shape[0]));
+  test_set_size = int(np.round(np.float(util.test_set_size_percentage) / 100 * data.shape[0]));
+  train_set_size = data.shape[0] - (valid_set_size + test_set_size);
+
+  x_train = data[:train_set_size, :-1, :]
+  y_train = data_y[:train_set_size, :-1, :]
+
+  x_valid = data[train_set_size:train_set_size + valid_set_size, :-1, :]
+  y_valid = data_y[train_set_size:train_set_size + valid_set_size, :-1, :]
+
+  x_test = data[train_set_size + valid_set_size:, :-1, :]
+  y_test = data_y[train_set_size + valid_set_size:, :-1, :]
+  return x_train, y_train, x_valid, y_valid, x_test, y_test, min_max_scaler_x, min_max_scaler_y
+
 
 def portfolio_annualised_performance(weights, mean_returns, cov_matrix):
     returns = np.sum(mean_returns * weights) * 252
