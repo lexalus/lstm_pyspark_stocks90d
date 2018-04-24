@@ -2,11 +2,11 @@ import numpy as np
 import pandas as pd
 import datetime as dt
 from pandas.tseries.holiday import USFederalHolidayCalendar as calendar
-from keras.models import Sequential
-from keras.layers import LSTM,Dense,Dropout,TimeDistributed,Flatten,Masking
-import sklearn
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 import stockstats
+from math import sqrt
+import scipy.optimize as spo
+
 
 valid_set_size_percentage = 10
 test_set_size_percentage = 10
@@ -288,3 +288,147 @@ def create_stock_data(ticker, df):
 
     return diff_df_matrix, last_date
 
+
+def portfolio_annualised_performance(weights, mean_returns, cov_matrix):
+    returns = np.sum(mean_returns * weights) * 252
+    std = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights))) * np.sqrt(252)
+    return std, returns
+
+def find_sharpe_o_var(weights, arg_list):
+    mean_returns, cov_matrix, risk_free_rate, desired_return, sharpe = arg_list
+    portfolio_std_dev, portfolio_return = portfolio_annualised_performance(weights, mean_returns, cov_matrix)
+    return portfolio_std_dev
+
+def max_it(stocks, weights, mean_returns, cov_matrix, risk_free_rate, sharpe=True):
+    cons = ({'type': 'ineq',
+             'fun': lambda weight: np.sum(weight) - 1.0})
+    bds = tuple([(0, 1) for weight in weights])
+    result = spo.minimize(find_sharpe_o_var, [1/len(weights) for weight in weights],
+                          args=[mean_returns,
+                                cov_matrix,
+                                risk_free_rate,
+                                True],
+                          method='SLSQP',
+                          bounds=bds,
+                          constraints=cons)
+    w_g = result.x
+    mu_g = w_g * mean_returns
+    var_g = np.dot(w_g * cov_matrix, w_g)
+
+    return_df = pd.DataFrame(w_g, columns=['weights'])
+    return_df['return'] = mu_g
+    return_df['variance'] = var_g
+    return_df['ticker'] = stocks
+    return return_df
+
+
+def random_portfolios(num_portfolios, mean_returns, cov_matrix, risk_free_rate):
+    results = np.zeros((len(mean_returns) - 1, num_portfolios))
+    weights_record = []
+    for i in range(num_portfolios):
+        weights = np.random.random(len(mean_returns))
+        weights /= np.sum(weights)
+        weights_record.append(weights)
+        portfolio_std_dev, portfolio_return = portfolio_annualised_performance(weights, mean_returns, cov_matrix)
+        results[0, i] = portfolio_std_dev
+        results[1, i] = portfolio_return
+        results[2, i] = (portfolio_return - risk_free_rate) / portfolio_std_dev
+    return results, weights_record
+
+
+def find_max_sharpe_min_vol(mean_returns, cov_matrix, num_portfolios, risk_free_rate, table):
+    results, weights = random_portfolios(num_portfolios, mean_returns, cov_matrix, risk_free_rate)
+
+    max_sharpe_idx = np.argmax(results[2])
+    sdp, rp = results[0, max_sharpe_idx], results[1, max_sharpe_idx]
+    max_sharpe_allocation = pd.DataFrame(weights[max_sharpe_idx], index=table.columns, columns=['allocation_sharpe'])
+    max_sharpe_allocation.allocation_sharpe = [round(i * 100, 2) for i in max_sharpe_allocation.allocation_sharpe]
+    max_sharpe_allocation['volatility_sharpe'] = round(sdp, 2)
+    max_sharpe_allocation['return_sharpe'] = round(rp, 2)
+
+    min_vol_idx = np.argmin(results[0])
+    sdp_min, rp_min = results[0, min_vol_idx], results[1, min_vol_idx]
+    min_vol_allocation = pd.DataFrame(weights[min_vol_idx], index=table.columns, columns=['allocation_min'])
+    min_vol_allocation.allocation_min = [round(i * 100, 2) for i in min_vol_allocation.allocation_min]
+    min_vol_allocation['volatility_min'] = round(sdp_min, 2)
+    min_vol_allocation['return_min'] = round(rp_min, 2)
+    final = max_sharpe_allocation.join(min_vol_allocation)
+
+    return final
+
+
+def find_percent_returns(df):
+    return df.pct_change()\
+        .replace([np.inf, -np.inf], np.nan)\
+        .fillna(0)
+
+
+def set_up_stock_data(df):
+    df = df.pivot_table('avg_price', 'date', 'ticker')
+    df.reset_index(drop=False, inplace=True)
+    df = df.fillna(0)\
+        .set_index('date')
+    return df
+
+
+def find_avg_price(df, list):
+    df['avg_price'] = (df[list[0]] + df[list[1]] + df[list[2]]) / 3
+    return df
+
+def find_max_utility(stocks, return_list, price_list, utility):
+
+    def expected_utility(stocks, returns):
+        return -sqrt(sum([stocks[x] * returns[x] for x in range(0, len(stocks))]))
+
+    cons = ({'type': 'ineq',
+             'fun': lambda stocks: utility - sum([price_list[x] * round(stocks[x], 0) for x in range(0, len(stocks))])})
+    bds = tuple([(0, utility) for stock in stocks])
+    result = spo.minimize(expected_utility, [5 for stock in stocks], args=return_list, method='SLSQP', bounds=bds,
+                          constraints=cons)
+
+    utility = pd.DataFrame(np.round(result.x, 0))
+    utility['ticker'] = stocks
+    utility.columns = ['amount_utility', 'ticker']
+    utility['proportion_utility'] = utility['amount_utility'] / np.sum(utility['amount_utility'])
+    utility.index = utility.ticker
+    utility = utility[['amount_utility', 'proportion_utility']]
+    return utility
+
+def portfolio_already_annualised_performance(weights, mean_returns, cov_matrix):
+    returns = np.sum(mean_returns * weights)
+    std = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+    return std, returns
+
+
+def find_var(weights, arg_list):
+    mean_returns, cov_matrix, risk_free_rate, sharpe = arg_list
+    portfolio_std_dev, portfolio_return = portfolio_already_annualised_performance(weights, mean_returns, cov_matrix)
+    return portfolio_std_dev
+
+
+def min_var(stocks, mean_returns, cov_matrix, risk_free_rate, desired_return):
+    p = [mean_returns,
+         cov_matrix,
+         risk_free_rate,
+         desired_return,
+         False]
+    cons = ({'type': 'eq',
+             'fun': lambda weight: np.sum(weight) - 1},
+            {'type': 'ineq',
+             'fun': lambda weight, p: np.sum(weight * p[0]) - p[3],
+             'args': (p,)})
+    bds = tuple([(0, None) for stock in stocks])
+    result = spo.minimize(find_sharpe_o_var, [1 / len(stocks) for stock in stocks],
+                          args=(p,),
+                          method='SLSQP',
+                          bounds=bds,
+                          constraints=cons)
+    w_g = np.round(result.x, 2)
+    mu_g = np.matrix(np.array(w_g)) * np.reshape(np.matrix(mean_returns), (len(mean_returns), 1))
+    return_df = pd.DataFrame(w_g, columns=['weights'])
+    return_df['return'] = np.array(mu_g)[0][0]
+    return_df['variance'] = np.sqrt(np.dot(w_g.T, np.dot(cov_matrix, w_g)))
+    return_df.index = stocks
+    return_df = return_df[['weights', 'return', 'variance']]
+
+    return return_df
