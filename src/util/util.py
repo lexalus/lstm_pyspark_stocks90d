@@ -134,7 +134,7 @@ def generate_date_features(date_index):
         kwargs = {quarter[i]: date_index.map(lambda row: int(row.quarter == i))}
         out_df = out_df.assign(**kwargs)
 
-    years = ['y14', 'y15', 'y16', 'y17']
+    years = ['y14', 'y15', 'y16', 'y17', 'y18']
     for i in range(len(years)):
         kwargs = {years[i]: date_index.map(lambda row: int(row.year == i + 2014))}
         out_df = out_df.assign(**kwargs)
@@ -263,9 +263,13 @@ def clean_dataset(df):
     indices_to_keep = ~df.isin([np.nan, np.inf, -np.inf]).any(1)
     return df[indices_to_keep].astype(np.float64)
 
-def create_stock_data(ticker, df):
-    df_stock = df.iloc[df.index.get_level_values('Symbol') == ticker]
-    df_stock = df_stock[['Open', 'High', 'Low', 'Close', 'Volume']]
+def create_stock_data(ticker, df, iterative):
+    if iterative:
+        df_stock = df[['open', 'high', 'low', 'close', 'volume']]
+        df_stock.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+    else:
+        df_stock = df.iloc[df.index.get_level_values('Symbol') == ticker]
+        df_stock = df_stock[['Open', 'High', 'Low', 'Close', 'Volume']]
     df_stock = find_stock_features(df_stock)
     df_stock = df_stock.dropna()
     diff_df = df_stock.diff().dropna()
@@ -286,16 +290,21 @@ def create_stock_data(ticker, df):
 
     diff_df_matrix = clean_dataset(diff_df).as_matrix()
 
-    return diff_df_matrix, last_date
+    return df_stock, diff_df_matrix, last_date
 
-def create_datasets(diff_df_matrix, last_date):
+def create_datasets(diff_df_matrix, last_date, iterative):
   data_raw_x = diff_df_matrix
+  print(data_raw_x.shape)
   data_raw_y = diff_df_matrix[:,[1,2,3,4,5]]# convert to numpy array
 
   min_max_scaler_x = MinMaxScaler()
   x_norm = min_max_scaler_x.fit_transform(data_raw_x)
 
-  x_norm = add_date_features(last_date[1], x_norm)
+  if iterative:
+    x_norm = add_date_features(last_date, x_norm)
+  else:
+    x_norm = add_date_features(last_date[1], x_norm)
+  print(x_norm.shape)
 
   min_max_scaler_y = MinMaxScaler()
   y_norm = min_max_scaler_y.fit_transform(data_raw_y)
@@ -316,8 +325,8 @@ def create_datasets(diff_df_matrix, last_date):
 
   data = np.array(data);
   data_y = np.array(data_y);
-  valid_set_size = int(np.round(np.float(util.valid_set_size_percentage) / 100 * data.shape[0]));
-  test_set_size = int(np.round(np.float(util.test_set_size_percentage) / 100 * data.shape[0]));
+  valid_set_size = int(np.round(np.float(valid_set_size_percentage) / 100 * data.shape[0]));
+  test_set_size = int(np.round(np.float(test_set_size_percentage) / 100 * data.shape[0]));
   train_set_size = data.shape[0] - (valid_set_size + test_set_size);
 
   x_train = data[:train_set_size, :-1, :]
@@ -336,10 +345,6 @@ def portfolio_annualised_performance(weights, mean_returns, cov_matrix):
     std = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights))) * np.sqrt(252)
     return std, returns
 
-def find_sharpe_o_var(weights, arg_list):
-    mean_returns, cov_matrix, risk_free_rate, desired_return, sharpe = arg_list
-    portfolio_std_dev, portfolio_return = portfolio_annualised_performance(weights, mean_returns, cov_matrix)
-    return portfolio_std_dev
 
 def max_it(stocks, weights, mean_returns, cov_matrix, risk_free_rate, sharpe=True):
     cons = ({'type': 'ineq',
@@ -418,22 +423,28 @@ def find_avg_price(df, list):
     return df
 
 def find_max_utility(stocks, return_list, price_list, utility):
+    def expected_utility(stocks, returnx):
+        returnsx, price = returnx
+        # returns = [returns[x] - price[x] for x in range(0, len(price))]
+        # list2 = [0 if i < 0 else i for i in returns]
+        return -np.sqrt(np.sum(stocks * returnsx))
 
-    def expected_utility(stocks, returns):
-        return -sqrt(sum([stocks[x] * returns[x] for x in range(0, len(stocks))]))
+    p = [return_list,
+         price_list]
 
-    cons = ({'type': 'ineq',
-             'fun': lambda stocks: utility - sum([price_list[x] * round(stocks[x], 0) for x in range(0, len(stocks))])})
-    bds = tuple([(0, utility) for stock in stocks])
-    result = spo.minimize(expected_utility, [5 for stock in stocks], args=return_list, method='SLSQP', bounds=bds,
-                          constraints=cons)
+    cons = ({'type': 'eq',
+             'fun': lambda stocks, p: utility - np.sum(stocks * p[1]),
+             'args': (p,)})
+    bds = tuple([(0, utility) for x in stocks])
+    result = spo.minimize(expected_utility, [1 for x in stocks], args=(p,), method='SLSQP', bounds=bds,
+                              constraints=cons)
 
     utility = pd.DataFrame(np.round(result.x, 0))
     utility['ticker'] = stocks
-    utility.columns = ['amount_utility', 'ticker']
-    utility['proportion_utility'] = utility['amount_utility'] / np.sum(utility['amount_utility'])
+    utility.columns = ['shares_bought_utility', 'ticker']
+    utility['portfolio_proportion_utility'] = np.round(utility['shares_bought_utility'] / np.sum(utility['shares_bought_utility']), 2)
     utility.index = utility.ticker
-    utility = utility[['amount_utility', 'proportion_utility']]
+    utility = utility[['shares_bought_utility', 'portfolio_proportion_utility']]
     return utility
 
 def portfolio_already_annualised_performance(weights, mean_returns, cov_matrix):
@@ -445,15 +456,35 @@ def portfolio_already_annualised_performance(weights, mean_returns, cov_matrix):
 def find_var(weights, arg_list):
     mean_returns, cov_matrix, risk_free_rate, sharpe = arg_list
     portfolio_std_dev, portfolio_return = portfolio_already_annualised_performance(weights, mean_returns, cov_matrix)
-    return portfolio_std_dev
+    sharpe = (portfolio_return-risk_free_rate)/portfolio_std_dev
+    return 1/sharpe
+
+def find_sharpe_o_var(weights, arg_list):
+    mean_returns, cov_matrix, risk_free_rate, desired_return, use_sharpe = arg_list
+    portfolio_std_dev, portfolio_return = portfolio_annualised_performance(weights, mean_returns, cov_matrix)
+    if use_sharpe:
+        return_value = portfolio_return/portfolio_std_dev
+        return 1/return_value
+    else:
+        return portfolio_std_dev
+    #return 1/sharpe#portfolio_std_dev
+
+def find_max_sharpe_max_utility(weights, arg_list):
+    mean_returns, cov_matrix, risk_free_rate, desired_return, use_sharpe = arg_list
+    portfolio_std_dev, portfolio_return = portfolio_annualised_performance(weights, mean_returns, cov_matrix)
+    if use_sharpe:
+        return_value = portfolio_return/portfolio_std_dev
+        return 1/return_value
+    else:
+        return portfolio_std_dev
 
 
-def min_var(stocks, mean_returns, cov_matrix, risk_free_rate, desired_return):
+def min_var(stocks, mean_returns, cov_matrix, risk_free_rate, desired_return, use_sharpe):
     p = [mean_returns,
          cov_matrix,
          risk_free_rate,
          desired_return,
-         False]
+         use_sharpe]
     cons = ({'type': 'eq',
              'fun': lambda weight: np.sum(weight) - 1},
             {'type': 'ineq',
@@ -472,5 +503,56 @@ def min_var(stocks, mean_returns, cov_matrix, risk_free_rate, desired_return):
     return_df['variance'] = np.sqrt(np.dot(w_g.T, np.dot(cov_matrix, w_g)))
     return_df.index = stocks
     return_df = return_df[['weights', 'return', 'variance']]
+    if use_sharpe:
+        return_df.columns = ['weights_s', 'return_s', 'variance_s']
+    else:
+        return_df.columns = ['weights_v', 'return_v', 'variance_v']
 
     return return_df
+
+
+def find_max_utility_sharpe(stocks, future_price, price, mean_returns, cov_matrix,
+                            risk_free_rate, desired_return, utility):
+    def expected_utility(stockx, args):
+        weights = stockx
+        future_price, price, mean_returns, cov_matrix, risk_free_rate, desired_return, utility = args
+        stocks = np.array([utility * x for x in weights])
+        utility = sqrt(np.sum(stocks * future_price))
+        # returns = [returns[x] - price[x] for x in range(0, len(price))]
+        # list2 = [0 if i < 0 else i for i in returns]
+        portfolio_std_dev, portfolio_return = portfolio_annualised_performance(weights, mean_returns, cov_matrix)
+        return_value = portfolio_return / portfolio_std_dev
+        return (1/(utility) + 1/(return_value)) **portfolio_std_dev
+
+    p = [future_price,
+         price,
+         mean_returns,
+         cov_matrix,
+         risk_free_rate,
+         desired_return,
+         utility]
+
+    i = [1.0 / len(stocks) for x in stocks]
+
+    cons = ({'type': 'ineq',
+             'fun': lambda stock, p: utility - np.sum(p[6] * stock * p[1]),
+             'args': (p,)},
+            {'type': 'eq',
+             'fun': lambda stock, p: 1 - np.sum(stock),
+             'args': (p,)},)
+    bds = tuple([(0, None) for x in i])
+    results = spo.minimize(expected_utility, i, args=(p,), method='SLSQP', constraints=cons, bounds=bds)
+
+    result_x = [round(x, 2) for x in list(results.x)]
+
+    predicted_utility = np.sum(np.array(result_x) * np.array(utility) * np.array(future_price))
+    predicted_return = np.sum(np.array(result_x) * np.array(mean_returns))
+    predicted_variance = np.sqrt(np.dot(np.array(result_x).T, np.dot(np.array(cov_matrix), np.array(result_x))))
+
+    result_df = pd.DataFrame(result_x, columns=['weights'])
+    result_df['utility_sharpe_utility'] = predicted_utility
+    result_df['utility_sharpe_return'] = predicted_return
+    result_df['utility_sharpe_var'] = predicted_variance
+    result_df.index = stocks
+
+    return result_df

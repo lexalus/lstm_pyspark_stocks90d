@@ -1,7 +1,7 @@
 import os
 import argparse
-from keras.models import Sequential
-from keras.layers import LSTM,Dense,Dropout,TimeDistributed,Flatten,Masking
+#from keras.models import Sequential
+#from keras.layers import LSTM,Dense,Dropout,TimeDistributed,Flatten,Masking
 import numpy as np
 import pandas as pd
 import util.util as util
@@ -33,25 +33,52 @@ class PortfolioOptimizer:
         stock_list = [stock for stock in self.stock_data.columns.unique()]
         return_list = [returns_annual[stock] for stock in stock_list]
         utility_prices = [data_utility[stock].iloc[0] for stock in stock_list]
+        utility_forecasted_prices = [data_utility[stock].iloc[-1] for stock in stock_list]
 
 
         max_utility = util.find_max_utility(stock_list,
-                                            return_list,
+                                            utility_forecasted_prices,
                                             utility_prices,
                                             self.utility)
 
         cov_annual = self.cov_matrix * 250
 
+        abs_min_sharpe = util.min_var(stock_list,
+                                      return_list,
+                                      cov_annual,
+                                      self.risk_free,
+                                      self.returns_wanted,
+                                      True)
+
         abs_min_var = util.min_var(stock_list,
-                                   return_list,
-                                   cov_annual,
-                                   self.risk_free,
-                                   self.returns_wanted)
+                                      return_list,
+                                      cov_annual,
+                                      self.risk_free,
+                                      self.returns_wanted,
+                                      False)
 
-        all_types = max_min_portfolio.join(max_utility)\
-            .join(abs_min_var)
+        max_sharpe_util = util.find_max_utility_sharpe(stock_list,
+                                                       utility_forecasted_prices,
+                                                       utility_prices,
+                                                       return_list,
+                                                       cov_annual,
+                                                       self.risk_free,
+                                                       self.returns_wanted,
+                                                       self.utility)
+        #print(max_sharpe_util.head())
 
-        return all_types
+
+
+        #all_types = abs_min_sharpe.join(max_utility)\
+         #   .join(abs_min_var)\
+          #  .join(max_sharpe_util)
+
+        #all_types.columns = ['max_sharpe_weights', 'max_sharpe_return', 'max_sharpe_variance',
+                         #    'shares_bought_utility', 'portfolio_proportion_utility',
+                          #   'min_var_weights', 'min_var_return', 'min_var_variance',
+                           #  'max_us_weights', 'max_us_return', 'max_us_variance']
+
+        return max_sharpe_util
 
 
 def main(date, returns_wanted, risk_level, utility):
@@ -65,7 +92,7 @@ def main(date, returns_wanted, risk_level, utility):
     ##find forecasted risk free rate
     risk_free = util.find_avg_price(risk_free, ['open', 'low', 'close'])
     risk_free = risk_free['avg_price']
-    risk_free_rate = np.average(risk_free[-180:-1])/100.0
+    forecasted_rf_rate = np.average(risk_free[-180:-1])/100.0
 
 ##find forecasted market rates
     sp_returns = util.find_avg_price(sp_returns, ['open', 'low', 'high'])
@@ -80,22 +107,23 @@ def main(date, returns_wanted, risk_level, utility):
 
     returns = util.find_percent_returns(stock_pivot)
 
-    mean_returns = returns.mean()
+    forecasted_mean_returns = returns[-180:-1].mean()
 
-    cov_matrix = returns.cov()
+    forecasted_cov_matrix = returns[-180:-1].cov()
 
     optimize = PortfolioOptimizer(
         date,
         float(returns_wanted),
         risk_level,
         float(utility),
-        mean_returns,
+        forecasted_mean_returns,
         stock_pivot,
         sp_returns,
-        risk_free_rate,
-        cov_matrix)
+        forecasted_rf_rate,
+        forecasted_cov_matrix)
 
     final_output = optimize.return_possible_portfolio()
+    #print(final_output[final_output.min_var_weights > 0])
     print(final_output.head())
     return final_output
 
